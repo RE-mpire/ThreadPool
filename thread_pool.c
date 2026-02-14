@@ -91,3 +91,29 @@ static int mpmc_enqueue_blocking(mpmc_queue_t *q, job_t job) {
   }
   return -1;
 }
+
+// Blocking dequeue that waits on semaphore. Returns 0 on success and fills job.
+// Returns -1 if interrupted by shutdown (the caller should check pool state separately).
+static int mpmc_dequeue_wait(mpmc_queue_t *q, job_t *out_job) {
+  // wait for available count
+  if (sem_wait(&q->available) != 0) return -1;
+  size_t pos = atomic_load_explicit(&q->dequeue_pos, memory_order_relaxed);
+  for (;;) {
+    node_t *node = &q->buffer[pos & q->mask];
+    size_t seq = atomic_load_explicit(&node->seq, memory_order_acquire);
+    size_t dif = seq - (pos + 1);
+    if (dif == 0) {
+      if (atomic_compare_exchange_weak_explicit(&q->dequeue_pos, &pos, pos + 1,
+        memory_order_relaxed, memory_order_relaxed)) {
+        // we've reserved the slot
+        *out_job = node->job; // copy
+        // mark slot as free for producers: seq = pos + capacity
+        atomic_store_explicit(&node->seq, pos + q->capacity, memory_order_release);
+        return 0;
+      }
+    } else {
+      pos = atomic_load_explicit(&q->dequeue_pos, memory_order_relaxed);
+    }
+  }
+  return -1;
+}
