@@ -1,4 +1,4 @@
-
+# Non-Blocking Thread Pool
 A fast efficient MPMC non-blocking thread pool library using C11 intrinsics.
 
 Internally uses MPMC queue to store jobs
@@ -38,4 +38,3 @@ make test_thread_pool # Test the thread pool API
 Test coverage includes:
 - MPMC queue: capacity rounding, FIFO ordering, wraparound stability, full-queue detection, multi-producer/multi-consumer stress tests
 - Thread pool: create/destroy, single and multiple job execution, queue-full semantics, blocking submit, concurrent job execution, concurrent producers, graceful shutdown
-````
