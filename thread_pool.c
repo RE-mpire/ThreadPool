@@ -137,3 +137,15 @@ static int mpmc_dequeue_wait(mpmc_queue_t *q, job_t *out_job) {
   }
   return -1;
 }
+
+/* ---------------- Thread Pool ---------------- */
+
+struct pool {
+  mpmc_queue_t *q;
+  pthread_t *threads;
+  size_t n_threads;
+  atomic_int running;     // 1 = running, 0 = stopping
+  atomic_int accepting;   // 1 = accept new jobs
+  atomic_size_t busy;     // number of workers currently executing jobs
+  atomic_size_t queued;   // number of jobs enqueued but not yet completed
+};
