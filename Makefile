@@ -14,10 +14,16 @@ all: $(TARGET)
 
 clean:
 	rm -f $(OBJ) $(TARGET)
-	rm -f test_mpmc
+	rm -f test_mpmc test_thread_pool
 
 test_mpmc: tests/test_mpmc.c thread_pool.c
 	$(CC) $(TEST_CFLAGS) -o $@ tests/test_mpmc.c
-	./test_mpmc
+	./$@
 
-.PHONY: all clean test_mpmc
+test_thread_pool: tests/test_thread_pool.c thread_pool.c
+	$(CC) $(TEST_CFLAGS) -o $@ tests/test_thread_pool.c
+	./$@
+
+tests: test_mpmc test_thread_pool
+
+.PHONY: all clean test_mpmc test_thread_pool tests
