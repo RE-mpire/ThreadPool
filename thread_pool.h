@@ -20,6 +20,15 @@
 #include <semaphore.h>
 #include <pthread.h>
 
+// Platform-specific spin hint
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+  #define SPIN_HINT() __asm__ volatile("pause" ::: "memory")
+#elif defined(__aarch64__) || defined(__arm__)
+  #define SPIN_HINT() __asm__ volatile("yield" ::: "memory")
+#else
+  #define SPIN_HINT() do { } while (0)
+#endif
+
 typedef void (*job_fn)(void *arg);
 
 typedef struct {

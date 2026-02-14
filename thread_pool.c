@@ -25,7 +25,7 @@ typedef struct {
 
 typedef struct {
   node_t *buffer;    // slot buffer (capacity entries)
-  size_t capacity;    // power-of-two capacity
+  size_t capacity;   // power-of-two capacity
   size_t mask;
   atomic_size_t enqueue_pos;
   atomic_size_t dequeue_pos;
@@ -103,7 +103,7 @@ static int mpmc_enqueue_blocking(mpmc_queue_t *q, job_t job) {
     if (mpmc_enqueue_nb(q, job) == 0) return 0;
     // queue full - backoff
     if (spin < 32) {
-      for (int i = 0; i < (1 << spin); ++i) __asm__ volatile("pause" ::: "memory");
+      for (int i = 0; i < (1 << spin); ++i) SPIN_HINT();
       ++spin;
     } else {
       sched_yield();
@@ -149,3 +149,119 @@ struct pool {
   atomic_size_t busy;     // number of workers currently executing jobs
   atomic_size_t queued;   // number of jobs enqueued but not yet completed
 };
+
+static void *worker(void *arg) {
+  pool_t *pool = (pool_t *)arg;
+  while (1) {
+    job_t job;
+    if (mpmc_dequeue_wait(pool->q, &job) != 0) {
+      // sem_wait error; check if pool is stopping
+      if (!atomic_load_explicit(&pool->running, memory_order_acquire))
+        break;
+      continue;
+    }
+
+    // Poison pill (NULL function) indicates shutdown request
+    if (job.func == NULL) break;
+
+    // Mark this worker as busy
+    atomic_fetch_add_explicit(&pool->busy, 1, memory_order_acq_rel);
+
+    // Execute the job
+    job.func(job.arg);
+
+    // Mark done
+    atomic_fetch_sub_explicit(&pool->busy, 1, memory_order_acq_rel);
+    atomic_fetch_sub_explicit(&pool->queued, 1, memory_order_release);
+  }
+  return NULL;
+}
+
+pool_t *pool_create(size_t num_threads, size_t capacity) {
+  pool_t *pool = malloc(sizeof(*pool));
+  if (!pool) return NULL;
+
+  pool->q = mpmc_queue_create(capacity);
+  if (!pool->q) { 
+    free(pool); 
+    return NULL;
+  }
+
+  pool->n_threads = num_threads;
+  pool->threads = malloc(sizeof(pthread_t) * num_threads);
+  if (!pool->threads) { 
+    mpmc_queue_destroy(pool->q);
+    free(pool);
+    return NULL;
+  }
+  
+  atomic_init(&pool->running, 1);
+  atomic_init(&pool->accepting, 1);
+  atomic_init(&pool->busy, 0);
+  atomic_init(&pool->queued, 0);
+  for (size_t i = 0; i < num_threads; ++i) {
+    pthread_create(&pool->threads[i], NULL, worker, pool);
+  }
+  return pool;
+}
+
+void pool_destroy(pool_t *pool, int wait_for_jobs) {
+  if (!pool) return;
+
+  // Stop accepting new submissions immediately
+  atomic_store_explicit(&pool->accepting, 0, memory_order_release);
+
+  if (wait_for_jobs) {
+    // Wait efficiently until all queued jobs finish
+    while (atomic_load_explicit(&pool->queued, memory_order_acquire) > 0 ||
+         atomic_load_explicit(&pool->busy, memory_order_acquire) > 0) {
+    }
+  }
+
+  // Enqueue one poison-pill per worker to ensure each thread wakes and exits.
+  // Use blocking enqueue so we ensure the poison pills are actually placed.
+  job_t poison = { .func = NULL, .arg = NULL };
+  for (size_t i = 0; i < pool->n_threads; ++i) {
+    // This will block until there's space. Since we either waited for the queue to
+    // drain (wait_for_jobs) or we have stopped accepting new submissions, this will
+    // succeed in a finite time.
+    (void)mpmc_enqueue_blocking(pool->q, poison);
+  }
+
+  // Now mark running = 0 (workers will exit when they dequeue poison)
+  atomic_store_explicit(&pool->running, 0, memory_order_release);
+
+  // Join threads
+  for (size_t i = 0; i < pool->n_threads; ++i) pthread_join(pool->threads[i], NULL);
+
+  free(pool->threads);
+  mpmc_queue_destroy(pool->q);
+  free(pool);
+}
+
+
+int pool_submit(pool_t *pool, job_fn fn, void *arg) {
+  if (!atomic_load_explicit(&pool->accepting, memory_order_acquire)) return -1;
+
+  job_t job = { .func = fn, .arg = arg };
+  int ret = mpmc_enqueue_nb(pool->q, job);
+  if (ret == 0)
+    atomic_fetch_add_explicit(&pool->queued, 1, memory_order_relaxed);
+  return ret;
+}
+
+int pool_submit_blocking(pool_t *pool, job_fn fn, void *arg) {
+  if (!atomic_load_explicit(&pool->accepting, memory_order_acquire)) return -1;
+
+  job_t job = { .func = fn, .arg = arg };
+  int ret = mpmc_enqueue_blocking(pool->q, job);
+  if (ret == 0)
+    atomic_fetch_add_explicit(&pool->queued, 1, memory_order_relaxed);
+  return ret;
+}
+
+void pool_wait(pool_t *pool) {
+  while (atomic_load_explicit(&pool->queued, memory_order_acquire) > 0 ||
+       atomic_load_explicit(&pool->busy, memory_order_acquire) > 0) {
+  }
+}
