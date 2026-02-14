@@ -1,5 +1,21 @@
+/*
+ * Lock-free (MPMC) bounded queue thread-pool in C.
+ * Uses POSIX threads, semaphores, and C11 atomics.
+ *
+ * Usage:
+ *   pool_t *p = pool_create(4, 1024);
+ *   pool_submit(p, my_job, my_arg);
+ *   pool_wait(p);
+ *   pool_destroy(p, 1);
+ *
+ * Notes:
+ * - If you expect producers to be faster than consumers, configure a larger capacity.
+ */
+ 
 #include <stdlib.h>
+#include <stdint.h>
 #include "thread_pool.h"
+#include "mpmc_sem.h"
 
 // internal MPMC queue based on Vyukov's algorithm
 typedef struct {
@@ -13,7 +29,7 @@ typedef struct {
   size_t mask;
   atomic_size_t enqueue_pos;
   atomic_size_t dequeue_pos;
-  sem_t available;    // counts available jobs
+  mpmc_sem_t available;    // counts available jobs
 } mpmc_queue_t;
 
 static size_t next_power_of_two(size_t x) {
@@ -38,13 +54,17 @@ static mpmc_queue_t *mpmc_queue_create(size_t capacity) {
   }
   q->enqueue_pos = 0;
   q->dequeue_pos = 0;
-  sem_init(&q->available, 0, 0);
+  if (mpmc_sem_init(&q->available, 0) != 0) {
+    free(q->buffer);
+    free(q);
+    return NULL;
+  }
   return q;
 }
 
 static void mpmc_queue_destroy(mpmc_queue_t *q) {
   if (!q) return;
-  sem_destroy(&q->available);
+  mpmc_sem_destroy(&q->available);
   free(q->buffer);
   free(q);
 }
@@ -55,7 +75,7 @@ static int mpmc_enqueue_nb(mpmc_queue_t *q, job_t job) {
   for (;;) {
     node_t *node = &q->buffer[pos & q->mask];
     size_t seq = atomic_load_explicit(&node->seq, memory_order_acquire);
-    size_t dif = seq - pos;
+    intptr_t dif = (intptr_t)seq - (intptr_t)pos;
     if (dif == 0) {
       if (atomic_compare_exchange_weak_explicit(&q->enqueue_pos, &pos, pos + 1,
         memory_order_relaxed, memory_order_relaxed)) {
@@ -64,7 +84,7 @@ static int mpmc_enqueue_nb(mpmc_queue_t *q, job_t job) {
         // publish by setting seq = pos+1
         atomic_store_explicit(&node->seq, pos + 1, memory_order_release);
         // signal availability
-        sem_post(&q->available);
+        mpmc_sem_post(&q->available);
         return 0;
       }
       // CAS failed - pos updated to new value by CAS; loop with that pos
@@ -96,7 +116,7 @@ static int mpmc_enqueue_blocking(mpmc_queue_t *q, job_t job) {
 // Returns -1 if interrupted by shutdown (the caller should check pool state separately).
 static int mpmc_dequeue_wait(mpmc_queue_t *q, job_t *out_job) {
   // wait for available count
-  if (sem_wait(&q->available) != 0) return -1;
+  if (mpmc_sem_wait(&q->available) != 0) return -1;
   size_t pos = atomic_load_explicit(&q->dequeue_pos, memory_order_relaxed);
   for (;;) {
     node_t *node = &q->buffer[pos & q->mask];

@@ -1,3 +1,17 @@
+/*
+ * Lock-free (MPMC) bounded queue thread-pool in C.
+ * Uses POSIX threads, semaphores, and C11 atomics.
+ *
+ * Usage:
+ *   pool_t *p = pool_create(4, 1024);
+ *   pool_submit(p, my_job, my_arg);
+ *   pool_wait(p);
+ *   pool_destroy(p, 1);
+ *
+ * Notes:
+ * - If you expect producers to be faster than consumers, configure a larger capacity.
+ */
+
 #ifndef LOCKLESS_JOB_POOL_H
 #define LOCKLESS_JOB_POOL_H
 
